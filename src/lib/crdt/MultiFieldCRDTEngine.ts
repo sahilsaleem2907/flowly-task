@@ -347,7 +347,7 @@ export class MultiFieldCRDTEngine {
             fields: {} as Record<FieldType, any>
         };
 
-        this.engines.forEach((engine, field) => {
+        this.engines.forEach((_engine, field) => {
             const fieldStats = this.getFieldStats(field);
             allStats.fields[field] = fieldStats;
 
@@ -385,7 +385,7 @@ export class MultiFieldCRDTEngine {
     // Debug state for all fields
     debugAllStates(): void {
         console.log('🔍 Debug state for all fields:');
-        this.engines.forEach((engine, field) => {
+        this.engines.forEach((_engine, field) => {
             console.log(`\n--- Field: ${field} ---`);
             this.debugFieldState(field);
         });
@@ -393,12 +393,12 @@ export class MultiFieldCRDTEngine {
 
     // Reset all fields
     reset(): void {
-        this.engines.forEach(engine => {
-            engine.reset();
+        this.engines.forEach(_engine => {
+            _engine.reset();
         });
 
         // Reset field states
-        this.fieldStates.forEach((fieldState, field) => {
+        this.fieldStates.forEach((fieldState, _field) => {
             fieldState.content = '';
             fieldState.characters.clear();
             fieldState.operations = [];

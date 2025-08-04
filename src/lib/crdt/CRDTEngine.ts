@@ -7,7 +7,6 @@ import type {
 import { generatePosition, comparePositions, generateOperationId, generateCharId } from '../../types/CRDT';
 
 export class CRDTEngine {
-    private content: string = '';
     private operations: CRDTOperation[] = [];
     private characters: Map<string, CRDTChar> = new Map();
 
@@ -139,9 +138,6 @@ export class CRDTEngine {
 
         // Add to operations list
         this.operations.push(operation);
-
-        // Update content
-        this.content = this.getContent();
     }
 
     // Apply insert operation
@@ -218,7 +214,6 @@ export class CRDTEngine {
 
     // Reset engine state
     reset(): void {
-        this.content = '';
         this.operations = [];
         this.characters.clear();
     }
