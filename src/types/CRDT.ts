@@ -180,14 +180,6 @@ export const comparePositions = (a: string, b: string): number => {
     const aParts = a.split('.');
     const bParts = b.split('.');
 
-    // Handle backward compatibility with old position format (just numbers)
-    if (aParts.length === 1 && bParts.length === 1) {
-        // Both are old format, compare as numbers
-        const aNum = parseFloat(a);
-        const bNum = parseFloat(b);
-        return aNum - bNum;
-    }
-
     // Extract numeric parts for comparison
     const aNum = parseFloat(aParts[0]);
     const bNum = parseFloat(bParts[0]);
@@ -196,21 +188,8 @@ export const comparePositions = (a: string, b: string): number => {
         return aNum - bNum;
     }
 
-    // Handle mixed format comparison (old vs new format)
-    // Old format: "2.clientId.hash"
-    // New format: "2.0.clientId.hash"
-    const aHasSubPosition = aParts.length >= 3 && !isNaN(parseFloat(aParts[1]));
-    const bHasSubPosition = bParts.length >= 3 && !isNaN(parseFloat(bParts[1]));
-
-    // If one has sub-position and the other doesn't, the one with sub-position comes after
-    if (aHasSubPosition && !bHasSubPosition) {
-        return 1; // a comes after b
-    }
-    if (!aHasSubPosition && bHasSubPosition) {
-        return -1; // a comes before b
-    }
-
-    // If both have the same format, compare lexicographically
+    // If numeric parts are the same, compare lexicographically
+    // This handles cases where positions have different sub-parts
     return a.localeCompare(b);
 };
 
@@ -220,4 +199,49 @@ export const generateOperationId = (clientId: string): string => {
 
 export const generateCharId = (clientId: string): string => {
     return `char_${clientId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}; 
+};
+
+// Undo/Redo System Types
+export interface UndoStep {
+    id: string;
+    operations: CRDTOperation[];
+    timestamp: number;
+    userId: string;
+    field: FieldType;
+    description?: string; // Human-readable description of the action
+}
+
+export interface UndoRedoState {
+    undoStack: UndoStep[];
+    redoStack: UndoStep[];
+    currentBatch: CRDTOperation[] | null;
+    batchStartTime: number | null;
+    batchTimeout: number | null;
+}
+
+export interface UndoRedoMetadata {
+    isLocalOperation: boolean;
+    originalOperation?: CRDTOperation; // For tracking inverse operations
+    batchId?: string; // For grouping operations into undo steps
+}
+
+// Enhanced CRDTOperation with undo/redo metadata
+export interface CRDTOperationWithMetadata extends CRDTOperation {
+    metadata?: UndoRedoMetadata;
+}
+
+// Undo/Redo Configuration
+export interface UndoRedoConfig {
+    batchTimeout: number; // Time in ms to wait before creating a new batch
+    maxUndoSteps: number; // Maximum number of undo steps to keep
+    enableBatching: boolean; // Whether to enable operation batching
+}
+
+// Undo/Redo Statistics
+export interface UndoRedoStats {
+    totalUndoSteps: number;
+    totalRedoSteps: number;
+    currentBatchSize: number;
+    lastOperationTime: number;
+    averageBatchSize: number;
+} 

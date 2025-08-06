@@ -112,6 +112,9 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     const [isAddTagOpen, setIsAddTagOpen] = useState(false);
     const [newTagText, setNewTagText] = useState('');
 
+    // Track the last active field for undo/redo operations
+    const [lastActiveField, setLastActiveField] = useState<'content' | 'title' | 'description' | 'tags'>('content');
+
     const editorRef = useRef<HTMLDivElement>(null);
     const lastCursorPosition = useRef(0);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -162,6 +165,20 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
         }
     }, [fields.content]);
 
+    // Listen for field activation events from other components
+    useEffect(() => {
+        const handleFieldActivated = (event: CustomEvent) => {
+            const { field } = event.detail;
+            setLastActiveField(field);
+        };
+
+        window.addEventListener('fieldActivated', handleFieldActivated as EventListener);
+
+        return () => {
+            window.removeEventListener('fieldActivated', handleFieldActivated as EventListener);
+        };
+    }, []);
+
     // Handle keyboard events for deletions
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
         // Skip if we're syncing from CRDT
@@ -175,13 +192,17 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                 e.preventDefault();
                 if (e.shiftKey) {
                     // Ctrl+Shift+Z or Cmd+Shift+Z for redo
-                    if (canRedo('content')) {
-                        redo('content');
+                    if (canRedo(lastActiveField)) {
+                        redo(lastActiveField);
+                    } else {
+                        console.log(`⚠️ Cannot redo ${lastActiveField} - no operations available`);
                     }
                 } else {
                     // Ctrl+Z or Cmd+Z for undo
-                    if (canUndo('content')) {
-                        undo('content');
+                    if (canUndo(lastActiveField)) {
+                        undo(lastActiveField);
+                    } else {
+                        console.log(`⚠️ Cannot undo ${lastActiveField} - no operations available`);
                     }
                 }
                 return;
@@ -203,7 +224,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                     break;
             }
         }
-    }, [undo, redo, canUndo, canRedo]);
+    }, [undo, redo, canUndo, canRedo, lastActiveField]);
 
     // Handle text input changes
     const handleInput = useCallback((e: React.ChangeEvent<HTMLDivElement>) => {
@@ -617,7 +638,10 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                     contentEditable
                     onInput={handleInput}
                     onKeyDown={handleKeyDown}
-                    onFocus={handleFocus}
+                    onFocus={() => {
+                        setLastActiveField('content');
+                        handleFocus();
+                    }}
                     onBlur={handleBlur}
 
                     className="min-h-96 py-4 rounded-lg focus:outline-none text-black"
@@ -685,26 +709,30 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
 
                             {/* Undo Button */}
                             <button
-                                onClick={() => undo('content')}
-                                disabled={!canUndo('content')}
-                                className={`flex items-center justify-center w-8 h-8  ${canUndo('content')
+                                onClick={() => {
+                                    undo(lastActiveField);
+                                }}
+                                disabled={!canUndo(lastActiveField)}
+                                className={`flex items-center justify-center w-8 h-8  ${canUndo(lastActiveField)
                                     ? 'text-gray-600'
                                     : 'text-gray-400 cursor-not-allowed'
                                     }`}
-                                title="Undo (Ctrl+Z)"
+                                title={`Undo ${lastActiveField} (Ctrl+Z)`}
                             >
                                 <Undo className="w-4 h-4" />
                             </button>
 
                             {/* Redo Button */}
                             <button
-                                onClick={() => redo('content')}
-                                disabled={!canRedo('content')}
-                                className={`flex items-center justify-center w-8 h-8  ${canRedo('content')
+                                onClick={() => {
+                                    redo(lastActiveField);
+                                }}
+                                disabled={!canRedo(lastActiveField)}
+                                className={`flex items-center justify-center w-8 h-8  ${canRedo(lastActiveField)
                                     ? 'text-gray-600 '
                                     : 'text-gray-400 cursor-not-allowed'
                                     }`}
-                                title="Redo (Ctrl+Shift+Z)"
+                                title={`Redo ${lastActiveField} (Ctrl+Shift+Z)`}
                             >
                                 <Redo className="w-4 h-4" />
                             </button>

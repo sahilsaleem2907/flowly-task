@@ -11,10 +11,8 @@ const crdtReducer = (state: CRDTState, action: CRDTAction): CRDTState => {
             // Check if operation already exists to prevent duplicates
             const operationExists = state.operations.some(op => op.id === action.operation.id);
             if (operationExists) {
-                console.log(`🔄 Skipping duplicate operation: ${action.operation.id}`);
                 return state;
             }
-            console.log(`✅ Adding new operation: ${action.operation.id} (total: ${state.operations.length + 1})`);
             return {
                 ...state,
                 operations: [...state.operations, action.operation]
@@ -311,16 +309,32 @@ export const useMultiFieldCRDT = (documentId: string, currentUser: User) => {
 
     // Get CRDT statistics
     const getStats = useCallback(() => {
-        return crdtEngineRef.current?.getAllStats() || {
+        const stats = crdtEngineRef.current?.getAllStats() || {
             totalOperations: 0,
             insertOperations: 0,
             deleteOperations: 0,
             totalCharacters: 0,
             deletedCharacters: 0,
             bulkOperations: 0,
-            undoStackSize: 0,
-            redoStackSize: 0,
-            fields: {}
+            fields: {},
+            undoRedoStats: {}
+        };
+
+        // Transform undoRedoStats to match the expected interface
+        const undoRedoStats = stats.undoRedoStats || {};
+        const totalUndoStackSize = Object.values(undoRedoStats).reduce((sum: number, fieldStats: any) => sum + (fieldStats.totalUndoSteps || 0), 0);
+        const totalRedoStackSize = Object.values(undoRedoStats).reduce((sum: number, fieldStats: any) => sum + (fieldStats.totalRedoSteps || 0), 0);
+
+        return {
+            totalOperations: stats.totalOperations,
+            insertOperations: stats.insertOperations,
+            deleteOperations: stats.deleteOperations,
+            totalCharacters: stats.totalCharacters,
+            deletedCharacters: stats.deletedCharacters,
+            bulkOperations: stats.bulkOperations,
+            undoStackSize: totalUndoStackSize,
+            redoStackSize: totalRedoStackSize,
+            fields: stats.fields
         };
     }, []);
 
@@ -332,28 +346,41 @@ export const useMultiFieldCRDT = (documentId: string, currentUser: User) => {
         }
 
         try {
+            console.log(`🔄 Attempting to undo operations in field: "${field}"`);
 
-            // Perform undo
-            const undoneOperation = crdtEngineRef.current.undo(field);
+            // Perform undo (returns array of operations)
+            const undoneOperations = crdtEngineRef.current.undo(field);
 
-            if (!undoneOperation) {
+            if (!undoneOperations || undoneOperations.length === 0) {
+                console.log(`📋 No operations to undo in field "${field}"`);
                 return;
             }
 
+            console.log(`📊 Found ${undoneOperations.length} operations to undo for field "${field}"`);
 
-            // Add to operations (for history tracking)
-            dispatch({ type: 'APPLY_OPERATION', operation: undoneOperation });
+            // Apply each undone operation to the state
+            undoneOperations.forEach((operation, index) => {
+                console.log(`📝 Applying undo operation ${index + 1}/${undoneOperations.length}: ${operation.type} at position ${operation.position} for field ${operation.field}`);
+
+                // Add to operations (for history tracking)
+                dispatch({ type: 'APPLY_OPERATION', operation });
+
+                // Broadcast undo operation to other users
+                if (firebaseServiceRef.current) {
+                    firebaseServiceRef.current.broadcastOperation(operation);
+                }
+            });
 
             // Update field content
             const fieldContent = crdtEngineRef.current.getFieldContent(field);
+            console.log(`📄 Field "${field}" content after undo: "${fieldContent}"`);
             dispatch({ type: 'UPDATE_FIELD', field, content: fieldContent });
 
             // Update character tracking
             const fieldCharacters = crdtEngineRef.current.getFieldCharacters(field);
             dispatch({ type: 'UPDATE_CHARACTERS', field, characters: fieldCharacters });
 
-            // Broadcast undo operation to other users
-            firebaseServiceRef.current.broadcastOperation(undoneOperation);
+            console.log(`↩️ Successfully undid ${undoneOperations.length} operations in field "${field}"`);
 
         } catch (error) {
             console.error('Error undoing operation:', error);
@@ -368,30 +395,41 @@ export const useMultiFieldCRDT = (documentId: string, currentUser: User) => {
         }
 
         try {
-            // Perform redo
-            const redoneOperation = crdtEngineRef.current.redo(field);
+            console.log(`🔄 Attempting to redo operations in field: "${field}"`);
 
-            if (!redoneOperation) {
-                console.log(`📋 No operation to redo in field "${field}"`);
+            // Perform redo (returns array of operations)
+            const redoneOperations = crdtEngineRef.current.redo(field);
+
+            if (!redoneOperations || redoneOperations.length === 0) {
+                console.log(`📋 No operations to redo in field "${field}"`);
                 return;
             }
 
+            console.log(`📊 Found ${redoneOperations.length} operations to redo for field "${field}"`);
 
+            // Apply each redone operation to the state
+            redoneOperations.forEach((operation, index) => {
+                console.log(`📝 Applying redo operation ${index + 1}/${redoneOperations.length}: ${operation.type} at position ${operation.position} for field ${operation.field}`);
 
-            // Add to operations (for history tracking)
-            dispatch({ type: 'APPLY_OPERATION', operation: redoneOperation });
+                // Add to operations (for history tracking)
+                dispatch({ type: 'APPLY_OPERATION', operation });
+
+                // Broadcast redo operation to other users
+                if (firebaseServiceRef.current) {
+                    firebaseServiceRef.current.broadcastOperation(operation);
+                }
+            });
 
             // Update field content
             const fieldContent = crdtEngineRef.current.getFieldContent(field);
+            console.log(`📄 Field "${field}" content after redo: "${fieldContent}"`);
             dispatch({ type: 'UPDATE_FIELD', field, content: fieldContent });
 
             // Update character tracking
             const fieldCharacters = crdtEngineRef.current.getFieldCharacters(field);
             dispatch({ type: 'UPDATE_CHARACTERS', field, characters: fieldCharacters });
 
-            // Broadcast redo operation to other users
-            firebaseServiceRef.current.broadcastOperation(redoneOperation);
-
+            console.log(`↪️ Successfully redid ${redoneOperations.length} operations in field "${field}"`);
 
         } catch (error) {
             console.error('Error redoing operation:', error);
@@ -426,6 +464,13 @@ export const useMultiFieldCRDT = (documentId: string, currentUser: User) => {
         }
     }, []);
 
+    // Force finalize all pending batches
+    const finalizeBatches = useCallback(() => {
+        if (crdtEngineRef.current) {
+            crdtEngineRef.current.finalizeAllBatches();
+        }
+    }, []);
+
     return {
         // State
         fields: state.fields,
@@ -448,6 +493,7 @@ export const useMultiFieldCRDT = (documentId: string, currentUser: User) => {
         canUndo,
         canRedo,
         testUndoRedo,
+        finalizeBatches,
 
         // Current user
         currentUser: state.currentUser

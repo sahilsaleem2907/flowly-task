@@ -51,7 +51,8 @@ export const TitleEditor: React.FC<TitleEditorProps> = ({
                 } else if (diff.type === 'delete' && diff.length) {
                     // Delete each character individually
                     for (let i = diff.length - 1; i >= 0; i--) {
-                        deleteChar('title', diff.position + i);
+                        const position = diff.position + i;
+                        deleteChar('title', position);
                     }
                 }
             }
@@ -71,6 +72,12 @@ export const TitleEditor: React.FC<TitleEditorProps> = ({
             const cursorPosition = getTextPosition(range.startContainer, range.startOffset, titleRef);
             updatePresence(cursorPosition, false, 'title');
         }
+
+        // Notify parent component that title field is now active
+        // We'll use a custom event to communicate with DocumentEditor
+        window.dispatchEvent(new CustomEvent('fieldActivated', {
+            detail: { field: 'title' }
+        }));
     }, [updatePresence]);
 
     // Handle blur

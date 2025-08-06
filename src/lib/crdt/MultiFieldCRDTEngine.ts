@@ -1,24 +1,18 @@
 import { CRDTEngine } from './CRDTEngine';
+import { UndoRedoManager } from './UndoRedoManager';
 import type { CRDTOperation, FieldType, CRDTChar, InsertOperation, DeleteOperation } from '../../types/CRDT';
-import { generateOperationId } from '../../types/CRDT';
-
-// Undo/Redo stack for each field
-interface UndoRedoStack {
-    undoStack: CRDTOperation[];
-    redoStack: CRDTOperation[];
-}
 
 // Field-specific state
 interface FieldState {
     content: string;
     characters: Map<string, CRDTChar>;
     operations: CRDTOperation[];
-    undoRedoStack: UndoRedoStack;
 }
 
 export class MultiFieldCRDTEngine {
     private engines: Map<FieldType, CRDTEngine> = new Map();
     private fieldStates: Map<FieldType, FieldState> = new Map();
+    private undoRedoManager: UndoRedoManager;
     private documentId: string;
     private clientId: string;
 
@@ -28,6 +22,13 @@ export class MultiFieldCRDTEngine {
 
         // Initialize CRDT engines and field states for each field
         this.initializeEngines();
+
+        // Initialize undo/redo manager
+        this.undoRedoManager = new UndoRedoManager(clientId, documentId, {
+            batchTimeout: 1000, // 1 second batching
+            maxUndoSteps: 50,
+            enableBatching: true
+        });
     }
 
     private initializeEngines(): void {
@@ -41,11 +42,7 @@ export class MultiFieldCRDTEngine {
             this.fieldStates.set(field, {
                 content: '',
                 characters: new Map(),
-                operations: [],
-                undoRedoStack: {
-                    undoStack: [],
-                    redoStack: []
-                }
+                operations: []
             });
         });
     }
@@ -110,13 +107,10 @@ export class MultiFieldCRDTEngine {
             // Add to operation history
             fieldState.operations.push(operation);
 
-            // Add to undo stack
-            fieldState.undoRedoStack.undoStack.push(operation);
+            // Track operation for undo/redo
+            this.undoRedoManager.trackOperation(operation);
 
-            // Clear redo stack when new operation is performed
-            fieldState.undoRedoStack.redoStack = [];
-
-            console.log(`📝 Tracked operation for ${field}: ${operation.type} at position ${operation.position} (undo stack: ${fieldState.undoRedoStack.undoStack.length})`);
+            console.log(`📝 Tracked operation for ${field}: ${operation.type} at position ${operation.position}`);
         }
     }
 
@@ -128,11 +122,9 @@ export class MultiFieldCRDTEngine {
             return;
         }
 
-        // Remove field from operation before passing to single-field engine
-        const { field, ...operationWithoutField } = operation;
-        // Add the field property back since CRDTEngine expects it
-        const operationWithField = { ...operationWithoutField, field: 'content' as FieldType };
-        engine.applyOperation(operationWithField);
+        // Pass operation directly to the correct engine
+        // The single-field engine will handle the operation appropriately
+        engine.applyOperation(operation);
 
         // Update field state
         this.updateFieldState(operation.field);
@@ -192,124 +184,55 @@ export class MultiFieldCRDTEngine {
         return allCharacters;
     }
 
-    // Generate inverse operation for undo/redo
-    private generateInverseOperation(originalOperation: CRDTOperation): CRDTOperation {
-        if (originalOperation.type === 'insert') {
-            // Insert -> Delete
-            const insertOp = originalOperation as InsertOperation;
-            return {
-                id: generateOperationId(this.clientId),
-                type: 'delete',
-                field: insertOp.field,
-                position: insertOp.position,
-                charId: `undo_${insertOp.id}`, // Special ID for undo operations
-                char: insertOp.char,
-                clientId: this.clientId,
-                documentId: this.documentId,
-                timestamp: Date.now()
-            } as DeleteOperation;
-        } else {
-            // Delete -> Insert
-            const deleteOp = originalOperation as DeleteOperation;
-            return {
-                id: generateOperationId(this.clientId),
-                type: 'insert',
-                field: deleteOp.field,
-                position: deleteOp.position,
-                char: deleteOp.char,
-                clientId: this.clientId,
-                documentId: this.documentId,
-                timestamp: Date.now()
-            } as InsertOperation;
-        }
-    }
+
 
     // Undo operation for a specific field
-    undo(field: FieldType): CRDTOperation | null {
-        const fieldState = this.fieldStates.get(field);
-        if (!fieldState || fieldState.undoRedoStack.undoStack.length === 0) {
-            console.log(`📋 No operations to undo for field: ${field}`);
-            return null;
+    undo(field: FieldType): CRDTOperation[] | null {
+        const inverseOperations = this.undoRedoManager.undo(field);
+
+        if (inverseOperations) {
+            // Apply inverse operations to CRDT engines
+            inverseOperations.forEach(operation => {
+                this.applyOperation(operation);
+            });
+
+            console.log(`↩️ Undid ${inverseOperations.length} operations for ${field}`);
         }
 
-        // Get the last operation from undo stack
-        const lastOperation = fieldState.undoRedoStack.undoStack.pop()!;
-
-        // Generate inverse operation
-        const inverseOperation = this.generateInverseOperation(lastOperation);
-
-        // Apply the inverse operation to the CRDT engine
-        const engine = this.engines.get(field);
-        if (engine) {
-            // Remove field from operation before passing to single-field engine
-            const { field: _, ...operationWithoutField } = inverseOperation;
-            const operationWithField = { ...operationWithoutField, field: 'content' as FieldType };
-            engine.applyOperation(operationWithField);
-
-            // Update field state
-            this.updateFieldState(field);
-        }
-
-        // Move operation to redo stack
-        fieldState.undoRedoStack.redoStack.push(lastOperation);
-
-        console.log(`↩️ Undid operation for ${field}: ${lastOperation.type} -> ${inverseOperation.type}`);
-        return inverseOperation;
+        return inverseOperations;
     }
 
     // Redo operation for a specific field
-    redo(field: FieldType): CRDTOperation | null {
-        const fieldState = this.fieldStates.get(field);
-        if (!fieldState || fieldState.undoRedoStack.redoStack.length === 0) {
-            console.log(`📋 No operations to redo for field: ${field}`);
-            return null;
+    redo(field: FieldType): CRDTOperation[] | null {
+        const redoOperations = this.undoRedoManager.redo(field);
+
+        if (redoOperations) {
+            // Apply redo operations to CRDT engines
+            redoOperations.forEach(operation => {
+                this.applyOperation(operation);
+            });
+
+            console.log(`↪️ Redid ${redoOperations.length} operations for ${field}`);
         }
 
-        // Get the last operation from redo stack
-        const lastOperation = fieldState.undoRedoStack.redoStack.pop()!;
-
-        // Create a new operation with a new ID for redo
-        const redoOperation = {
-            ...lastOperation,
-            id: generateOperationId(this.clientId), // Generate new ID to avoid duplicate check
-            timestamp: Date.now()
-        };
-
-        // Apply the redo operation to the CRDT engine
-        const engine = this.engines.get(field);
-        if (engine) {
-            // Remove field from operation before passing to single-field engine
-            const { field: _, ...operationWithoutField } = redoOperation;
-            const operationWithField = { ...operationWithoutField, field: 'content' as FieldType };
-            engine.applyOperation(operationWithField);
-
-            // Update field state
-            this.updateFieldState(field);
-        }
-
-        // Move operation back to undo stack (with new ID)
-        fieldState.undoRedoStack.undoStack.push(redoOperation);
-
-        console.log(`↪️ Redid operation for ${field}: ${lastOperation.type} -> ${redoOperation.type} (new ID: ${redoOperation.id})`);
-        return redoOperation;
+        return redoOperations;
     }
 
     // Check if undo is available for a specific field
     canUndo(field: FieldType): boolean {
-        const fieldState = this.fieldStates.get(field);
-        return fieldState ? fieldState.undoRedoStack.undoStack.length > 0 : false;
+        return this.undoRedoManager.canUndo(field);
     }
 
     // Check if redo is available for a specific field
     canRedo(field: FieldType): boolean {
-        const fieldState = this.fieldStates.get(field);
-        return fieldState ? fieldState.undoRedoStack.redoStack.length > 0 : false;
+        return this.undoRedoManager.canRedo(field);
     }
 
     // Get statistics for a specific field
     getFieldStats(field: FieldType) {
         const engine = this.engines.get(field);
         const fieldState = this.fieldStates.get(field);
+        const undoRedoStats = this.undoRedoManager.getStats(field);
 
         if (!engine || !fieldState) {
             console.warn(`No CRDT engine found for field: ${field}`);
@@ -320,16 +243,14 @@ export class MultiFieldCRDTEngine {
                 totalCharacters: 0,
                 deletedCharacters: 0,
                 bulkOperations: 0,
-                undoStackSize: 0,
-                redoStackSize: 0
+                ...undoRedoStats
             };
         }
 
         const engineStats = engine.getStats();
         return {
             ...engineStats,
-            undoStackSize: fieldState.undoRedoStack.undoStack.length,
-            redoStackSize: fieldState.undoRedoStack.redoStack.length
+            ...undoRedoStats
         };
     }
 
@@ -342,9 +263,8 @@ export class MultiFieldCRDTEngine {
             totalCharacters: 0,
             deletedCharacters: 0,
             bulkOperations: 0,
-            undoStackSize: 0,
-            redoStackSize: 0,
-            fields: {} as Record<FieldType, any>
+            fields: {} as Record<FieldType, any>,
+            undoRedoStats: this.undoRedoManager.getAllStats()
         };
 
         this.engines.forEach((_engine, field) => {
@@ -357,8 +277,6 @@ export class MultiFieldCRDTEngine {
             allStats.deleteOperations += fieldStats.deleteOperations;
             allStats.totalCharacters += fieldStats.totalCharacters;
             allStats.deletedCharacters += fieldStats.deletedCharacters;
-            allStats.undoStackSize += fieldStats.undoStackSize;
-            allStats.redoStackSize += fieldStats.redoStackSize;
         });
 
         return allStats;
@@ -377,8 +295,10 @@ export class MultiFieldCRDTEngine {
         console.log(`🔍 Debug state for field: ${field}`);
         console.log(`📝 Content: "${fieldState.content}"`);
         console.log(`📊 Operations: ${fieldState.operations.length}`);
-        console.log(`↩️ Undo stack: ${fieldState.undoRedoStack.undoStack.length}`);
-        console.log(`↪️ Redo stack: ${fieldState.undoRedoStack.redoStack.length}`);
+
+        // Debug undo/redo state
+        this.undoRedoManager.debugState(field);
+
         engine.debugState();
     }
 
@@ -402,22 +322,29 @@ export class MultiFieldCRDTEngine {
             fieldState.content = '';
             fieldState.characters.clear();
             fieldState.operations = [];
-            fieldState.undoRedoStack.undoStack = [];
-            fieldState.undoRedoStack.redoStack = [];
         });
+
+        // Reset undo/redo manager
+        this.undoRedoManager.reset();
     }
 
     // Get undo/redo stack info for debugging
     getUndoRedoInfo(field: FieldType): { undoCount: number; redoCount: number } {
-        const fieldState = this.fieldStates.get(field);
-        if (!fieldState) {
-            return { undoCount: 0, redoCount: 0 };
-        }
-
+        const stats = this.undoRedoManager.getStats(field);
         return {
-            undoCount: fieldState.undoRedoStack.undoStack.length,
-            redoCount: fieldState.undoRedoStack.redoStack.length
+            undoCount: stats.totalUndoSteps,
+            redoCount: stats.totalRedoSteps
         };
+    }
+
+    // Get undo/redo manager for advanced operations
+    getUndoRedoManager(): UndoRedoManager {
+        return this.undoRedoManager;
+    }
+
+    // Force finalize all pending batches
+    finalizeAllBatches(): void {
+        this.undoRedoManager.finalizeAllBatches();
     }
 
     // Test undo/redo functionality
@@ -432,35 +359,38 @@ export class MultiFieldCRDTEngine {
         this.insertChar(field, 'o', 4);
 
         console.log(`📝 After insert: "${this.getFieldContent(field)}"`);
-        console.log(`↩️ Undo stack: ${this.getUndoRedoInfo(field).undoCount}`);
+        console.log(`↩️ Can undo: ${this.canUndo(field)}`);
 
-        // Undo last character
-        this.undo(field);
-        console.log(`📝 After undo: "${this.getFieldContent(field)}"`);
-        console.log(`↩️ Undo stack: ${this.getUndoRedoInfo(field).undoCount}`);
-        console.log(`↪️ Redo stack: ${this.getUndoRedoInfo(field).redoCount}`);
+        // Wait for batch to finalize
+        setTimeout(() => {
+            // Undo last batch
+            this.undo(field);
+            console.log(`📝 After undo: "${this.getFieldContent(field)}"`);
+            console.log(`↩️ Can undo: ${this.canUndo(field)}`);
+            console.log(`↪️ Can redo: ${this.canRedo(field)}`);
 
-        // Redo
-        this.redo(field);
-        console.log(`📝 After redo: "${this.getFieldContent(field)}"`);
-        console.log(`↩️ Undo stack: ${this.getUndoRedoInfo(field).undoCount}`);
-        console.log(`↪️ Redo stack: ${this.getUndoRedoInfo(field).redoCount}`);
+            // Redo
+            this.redo(field);
+            console.log(`📝 After redo: "${this.getFieldContent(field)}"`);
+            console.log(`↩️ Can undo: ${this.canUndo(field)}`);
+            console.log(`↪️ Can redo: ${this.canRedo(field)}`);
 
-        // Test multiple undos and redos
-        console.log(`\n🧪 Testing multiple undos and redos:`);
+            // Test multiple undos and redos
+            console.log(`\n🧪 Testing multiple undos and redos:`);
 
-        // Undo 2 more characters
-        this.undo(field);
-        this.undo(field);
-        console.log(`📝 After 2 more undos: "${this.getFieldContent(field)}"`);
+            // Undo 2 more times
+            this.undo(field);
+            this.undo(field);
+            console.log(`📝 After 2 more undos: "${this.getFieldContent(field)}"`);
 
-        // Redo 2 characters
-        this.redo(field);
-        this.redo(field);
-        console.log(`📝 After 2 redos: "${this.getFieldContent(field)}"`);
+            // Redo 2 times
+            this.redo(field);
+            this.redo(field);
+            console.log(`📝 After 2 redos: "${this.getFieldContent(field)}"`);
 
-        // Final undo
-        this.undo(field);
-        console.log(`📝 After final undo: "${this.getFieldContent(field)}"`);
+            // Final undo
+            this.undo(field);
+            console.log(`📝 After final undo: "${this.getFieldContent(field)}"`);
+        }, 1100); // Wait for batch timeout
     }
 } 
